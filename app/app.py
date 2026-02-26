@@ -3,6 +3,11 @@ from app.db import Post, create_db_and_tables, get_async_session
 from sqlalchemy.ext.asyncio import AsyncSession
 from contextlib import asynccontextmanager
 from sqlalchemy import select
+from app.images import imagekit
+import shutil
+import os
+import uuid
+import tempfile
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -21,17 +26,41 @@ async def upload_file(
     caption: str = Form(""),
     session: AsyncSession = Depends(get_async_session)
 ):
-    post = Post(
-        caption = caption,
-        url="dummyurl",
-        file_type="Photo",
-        file_name="dummy aname" 
-    )
+    
+    temp_file_path = None
 
-    session.add(post)
-    await session.commit()
-    await session.refresh(post)
-    return post
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[1]) as temp_file:
+            temp_file_path = temp_file.name
+            shutil.copyfileobj(file.file, temp_file)
+
+        upload_result = imagekit.files.upload(
+            file=open(temp_file_path, "rb"),
+            file_name=file.filename,
+            folder="/feeds",
+            tags=["feed", "featured"]
+        )
+# If something breaks here, you shoudld also remove the uploadded image in imagekitio. 
+
+        if upload_result.file_id:
+            post = Post(
+                    caption = caption,
+                    url=upload_result.url,
+                    file_type="video" if file.content_type.startswith("video/") else "image",
+                    file_name=upload_result.name
+                )
+
+            session.add(post)
+            await session.commit()
+            await session.refresh(post)
+            return post
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if temp_file_path and os.path.exists(temp_file_path):
+            os.unlink(temp_file_path)
+        file.file.close()
+
 
 @app.get("/feed")
 async def get_feed(
@@ -61,19 +90,31 @@ async def get_feed(
     
     return {"posts" : posts_data}
 
+@app.delete("/post/{post_id}")
+async def delete_post(post_id: str, session: AsyncSession = Depends(get_async_session)):
+    try:
+        post_uuid = uuid.UUID(post_id)
+
+        result = await session.execute(select(Post).where(Post.id == post_uuid))
+        post = result.scalars().first()
+
+        if not post:
+            raise HTTPException(status_code=404, detail="Post not found")
+        
+        await session.delete(post)
+        await session.commit()
+        
+        return {"success" : True, "message" : "Post deleted successfully"}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# * You can add the functionality to remove the image from the imagekit when you delete particular post.
+# * Same way you shouldn't be upload the image to imagekit if something breaks.
 
 
 
-
-
-
-
-
-
-
-
-
-
+# ============================= DEMO ========================================
 
 
 # @app.get("/posts")
